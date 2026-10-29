@@ -4,7 +4,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 from schemas import SchedulingIntent
 
-MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 device = "cpu"
 
 print(f"Loading {MODEL_ID} on {device}...")
@@ -18,45 +18,49 @@ pipe = pipeline(
     "text-generation",
     model=model,
     tokenizer=tokenizer,
-    max_new_tokens=90,
+    max_new_tokens=85,
     device=device,
     do_sample=False,
 )
 
-SYSTEM_PROMPT = """You are a precise email triage assistant.
+SYSTEM_PROMPT = """You are an email triage assistant.
 Read the email and current state carefully.
 
-Extract:
-1. SUMMARY: A 1-sentence plain-English summary of what the sender is communicating or requesting.
-2. TIME_PHRASE: The exact quoted proposed meeting time from the email (e.g. "Tuesday at 2:00 PM PST"), or None if no specific time is proposed.
+Output exactly 3 fields:
+SUMMARY: A 1-sentence plain-English summary of the sender's message.
+TIME_PHRASE: The exact quoted proposed meeting date/time from the email, or None.
+INTENT: Exactly one of:
+- PROPOSE_TIME: Sender asks for or proposes a meeting time, or asks to reschedule.
+- CONFIRM_TIME: Sender agrees to or confirms the currently scheduled hold.
+- CANCEL_TIME: Sender declines or cancels the upcoming meeting.
+- UNRELATED: Email is a general inquiry, complaint, invoice issue, or non-scheduling.
+- UNSURE: Conversational side-chatter, praise, or unclear scheduling intent.
 
 Format:
 SUMMARY: <1 sentence summary>
 TIME_PHRASE: <exact quoted time from email, or None>
+INTENT: <PROPOSE_TIME | CONFIRM_TIME | CANCEL_TIME | UNRELATED | UNSURE>
 """
 
 FEW_SHOT_EXAMPLES = [
     {
         "role": "user",
         "content": """Current Contact Status: new
-Direction: INBOUND
 Active Scheduled Event: None
-
 Email Subject: Intro chat
 Email Body:
-\"\"\"Hi Micah, would love to connect for 30 minutes next Monday, Nov 2 at 10:00 AM PST if you are free.\"\"\""""
+\"\"\"Hi Micah, are you free for a 30-minute intro call next Monday, Nov 2 at 10:00 AM PST?\"\"\""""
     },
     {
         "role": "assistant",
         "content": """SUMMARY: Sender is requesting a 30-minute intro call on next Monday, Nov 2 at 10:00 AM PST.
-TIME_PHRASE: next Monday, Nov 2 at 10:00 AM PST"""
+TIME_PHRASE: next Monday, Nov 2 at 10:00 AM PST
+INTENT: PROPOSE_TIME"""
     },
     {
         "role": "user",
         "content": """Current Contact Status: wait for them
-Direction: INBOUND
 Active Scheduled Event: [HOLD] Sync at 2026-10-15 10:00 PST (Status: hold)
-
 Email Subject: Re: Sync
 Email Body:
 \"\"\"Thursday at 10:00 AM PST works great for me. See you then!\"\"\""""
@@ -64,14 +68,13 @@ Email Body:
     {
         "role": "assistant",
         "content": """SUMMARY: Sender confirmed that Thursday at 10:00 AM PST works for the scheduled sync.
-TIME_PHRASE: Thursday at 10:00 AM PST"""
+TIME_PHRASE: Thursday at 10:00 AM PST
+INTENT: CONFIRM_TIME"""
     },
     {
         "role": "user",
         "content": """Current Contact Status: hold for me
-Direction: INBOUND
 Active Scheduled Event: [HOLD] Lunch at 2026-10-16 12:00 PST (Status: hold)
-
 Email Subject: Can't make lunch
 Email Body:
 \"\"\"So sorry, I have to cancel our sync this week due to an emergency. Will reach back out later.\"\"\""""
@@ -79,14 +82,13 @@ Email Body:
     {
         "role": "assistant",
         "content": """SUMMARY: Sender is cancelling the scheduled lunch due to an unexpected emergency.
-TIME_PHRASE: None"""
+TIME_PHRASE: None
+INTENT: CANCEL_TIME"""
     },
     {
         "role": "user",
         "content": """Current Contact Status: new
-Direction: INBOUND
 Active Scheduled Event: None
-
 Email Subject: Invoice problem
 Email Body:
 \"\"\"Hello, our card was charged twice for invoice #442. Please reverse the charge immediately.\"\"\""""
@@ -94,20 +96,33 @@ Email Body:
     {
         "role": "assistant",
         "content": """SUMMARY: Customer is demanding an immediate refund for duplicate charges on invoice #442.
-TIME_PHRASE: None"""
+TIME_PHRASE: None
+INTENT: UNRELATED"""
+    },
+    {
+        "role": "user",
+        "content": """Current Contact Status: hold for me
+Active Scheduled Event: [HOLD] Sync at 2026-10-22 14:00 PST (Status: hold)
+Email Subject: Proposal notes
+Email Body:
+\"\"\"Yes absolutely, looks great! Thanks for sending over the revision.\"\"\""""
+    },
+    {
+        "role": "assistant",
+        "content": """SUMMARY: Sender praised the document revision with no calendar scheduling intent.
+TIME_PHRASE: None
+INTENT: UNSURE"""
     }
 ]
 
 def classify_message(fixture: dict) -> dict:
+    active_event = fixture.get("active_event")
     active_event_str = "None"
-    if fixture.get("active_event"):
-        ev = fixture["active_event"]
-        active_event_str = f"{ev['title']} at {ev['start_time']} (Status: {ev['status']})"
+    if active_event:
+        active_event_str = f"{active_event['title']} at {active_event['start_time']} (Status: {active_event['status']})"
 
     target_user_content = f"""Current Contact Status: {fixture.get('current_contact_status', 'new')}
-Direction: {fixture.get('direction', 'INBOUND')}
 Active Scheduled Event: {active_event_str}
-
 Email Subject: {fixture['subject']}
 Email Body:
 \"\"\"{fixture['body']}\"\"\""""
@@ -122,33 +137,43 @@ Email Body:
     outputs = pipe(formatted_prompt)
     generated_text = outputs[0]["generated_text"][len(formatted_prompt):].strip()
 
-    # 1. Perception Layer (LLM extraction)
+    # --- 1. Extraction ---
     summary_match = re.search(r"SUMMARY:\s*([^\n]+)", generated_text)
     time_match = re.search(r"TIME_PHRASE:\s*([^\n]+)", generated_text)
+    intent_match = re.search(r"INTENT:\s*([A-Z_]+)", generated_text)
 
     summary = summary_match.group(1).strip() if summary_match else ""
     time_phrase = time_match.group(1).strip() if time_match else "None"
+    raw_intent = intent_match.group(1).strip() if intent_match else ""
 
-    # 2. Deterministic FSM Decision Layer (Pure Python)
+    # Null guardrail
+    if not summary:
+        return {
+            "predicted_intent": "AMBIGUOUS",
+            "time_phrase": "None",
+            "summary": "[Warning]: Empty summary produced; defaulting to Needs Attention.",
+            "raw_output": generated_text
+        }
+
     has_time = (time_phrase.lower() != "none" and len(time_phrase.strip()) > 0)
-    summary_lower = summary.lower()
-    body_lower = fixture["body"].lower()
-    active_event = fixture.get("active_event")
 
-    if "cancel" in summary_lower or "cancelling" in summary_lower:
+    # --- 2. Clean State Mapping ---
+    if raw_intent == "CANCEL_TIME":
         predicted_intent = "CANCEL_HOLD"
-    elif has_time:
-        # If an active hold exists and sender explicitly confirms/accepts without asking to reschedule
-        is_confirmation = ("works" in body_lower or "perfect" in body_lower or "confirmed" in body_lower) and \
-                          ("reschedule" not in summary_lower and "reschedule" not in body_lower)
-        if active_event and is_confirmation:
+    elif raw_intent == "CONFIRM_TIME":
+        # Domain Guardrail: To confirm an active hold, the email must explicitly reference/agree to a time!
+        # If they say "yes/confirmed" with no time phrase, it's ambiguous (e.g. approving a proposal or doc).
+        if active_event and has_time:
             predicted_intent = "CONFIRM_HOLD"
         else:
-            predicted_intent = "PROPOSE_NEW_TIME"
-    elif "option b" in body_lower or "proposal" in summary_lower or "how is your week" in body_lower:
-        predicted_intent = "AMBIGUOUS"
+            predicted_intent = "AMBIGUOUS"
+    elif raw_intent == "PROPOSE_TIME":
+        predicted_intent = "PROPOSE_NEW_TIME" if has_time else "AMBIGUOUS"
+    elif raw_intent == "UNRELATED":
+        predicted_intent = "AMBIGUOUS" if has_time else "NO_CALENDAR_ACTION"
     else:
-        predicted_intent = "NO_CALENDAR_ACTION"
+        # UNSURE or anything ambiguous defaults to AMBIGUOUS (Needs Attention)
+        predicted_intent = "AMBIGUOUS"
 
     return {
         "predicted_intent": predicted_intent,
@@ -162,7 +187,7 @@ def run_evaluation():
         fixtures = json.load(f)
 
     print("\n" + "="*80)
-    print("RUNNING OFFLINE EVALUATION (HYBRID: LLM PERCEPTION + DETERMINISTIC PYTHON FSM)")
+    print(f"RUNNING EVALUATION ON {MODEL_ID} (OPTION 3)")
     print("="*80)
 
     passed_count = 0

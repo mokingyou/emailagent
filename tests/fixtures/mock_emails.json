@@ -1,0 +1,96 @@
+[
+  {
+    "id": "mock_msg_001",
+    "description": "Inbound proposing a new meeting time from a new contact",
+    "direction": "INBOUND",
+    "current_contact_status": "new",
+    "active_event": null,
+    "sender": "Sarah Jenkins <sarah.jenkins@acmepartners.com>",
+    "subject": "Intro call & partnership sync",
+    "date": "Wed, 28 Oct 2026 14:15:00 -0700",
+    "body": "Hi Micah,\n\nGreat connecting on LinkedIn. I would love to schedule a quick 30-minute intro call to discuss how our teams could collaborate.\n\nAre you free next Tuesday, November 3rd at 2:00 PM PST?\n\nBest,\nSarah Jenkins\nDirector of BD, Acme Partners",
+    "expected_intent": "PROPOSE_NEW_TIME",
+    "expected_time": "2026-11-03T14:00:00"
+  },
+  {
+    "id": "mock_msg_002",
+    "description": "Inbound accepting an existing hold we were waiting on them for",
+    "direction": "INBOUND",
+    "current_contact_status": "wait for them",
+    "active_event": {
+      "title": "[HOLD] Partnership Sync: Micah <> Sarah Jenkins",
+      "start_time": "2026-11-03T14:00:00-08:00",
+      "status": "hold"
+    },
+    "sender": "Sarah Jenkins <sarah.jenkins@acmepartners.com>",
+    "subject": "Re: Partnership Sync",
+    "date": "Thu, 29 Oct 2026 10:00:00 -0700",
+    "body": "Hi Micah,\n\nTuesday at 2:00 PM PST works perfectly for me. Looking forward to our sync!\n\nBest,\nSarah",
+    "expected_intent": "CONFIRM_HOLD",
+    "expected_time": null
+  },
+  {
+    "id": "mock_msg_003",
+    "description": "Inbound counter-proposing a new time when a hold already exists",
+    "direction": "INBOUND",
+    "current_contact_status": "wait for them",
+    "active_event": {
+      "title": "[HOLD] Demo: Micah <> Elena Rostova",
+      "start_time": "2026-11-04T10:00:00-08:00",
+      "status": "hold"
+    },
+    "sender": "Elena Rostova <elena@biotechventures.vc>",
+    "subject": "Re: EmailAgent Demo",
+    "date": "Thu, 29 Oct 2026 11:20:00 -0700",
+    "body": "Hi Micah,\n\nSomething came up and Wednesday morning won't work anymore. Can we reschedule to Thursday, November 5th at 3:00 PM PST?\n\nWarmly,\nElena",
+    "expected_intent": "PROPOSE_NEW_TIME",
+    "expected_time": "2026-11-05T15:00:00"
+  },
+  {
+    "id": "mock_msg_004",
+    "description": "Inbound cancellation of an active hold",
+    "direction": "INBOUND",
+    "current_contact_status": "hold for me",
+    "active_event": {
+      "title": "[HOLD] Coffee: Micah <> David Miller",
+      "start_time": "2026-11-02T09:00:00-08:00",
+      "status": "hold"
+    },
+    "sender": "David Miller <dmiller@cloudscale.io>",
+    "subject": "Need to cancel our sync next week",
+    "date": "Thu, 29 Oct 2026 08:30:00 -0700",
+    "body": "Hey Micah,\n\nI need to cancel our coffee sync next Monday. Our product launch got pulled forward and my schedule is packed. I'll follow up in a couple of weeks once dust settles.\n\nThanks,\nDavid",
+    "expected_intent": "CANCEL_HOLD",
+    "expected_time": null
+  },
+  {
+    "id": "mock_msg_005",
+    "description": "Inbound support/billing complaint with no calendar intent",
+    "direction": "INBOUND",
+    "current_contact_status": "new",
+    "active_event": null,
+    "sender": "David Miller <dmiller@cloudscale.io>",
+    "subject": "URGENT: Double charged on invoice #INV-9281",
+    "date": "Wed, 28 Oct 2026 15:42:10 -0700",
+    "body": "Hello Support Team,\n\nI just checked our bank statement and we were billed twice for invoice #INV-9281 ($1,499.00 each) on October 27th. Please refund the duplicate charge immediately.\n\nThanks,\nDavid Miller",
+    "expected_intent": "NO_CALENDAR_ACTION",
+    "expected_time": null
+  },
+  {
+    "id": "mock_msg_006",
+    "description": "Inbound ambiguous email referring to proposal, not meeting",
+    "direction": "INBOUND",
+    "current_contact_status": "hold for me",
+    "active_event": {
+      "title": "[HOLD] Project Kickoff: Micah <> Alex Chen",
+      "start_time": "2026-11-06T14:00:00-08:00",
+      "status": "hold"
+    },
+    "sender": "Alex Chen <alex.chen@innovate.co>",
+    "subject": "Re: Project kickoff status update",
+    "date": "Wed, 28 Oct 2026 17:30:00 -0700",
+    "body": "Sounds good, yes let's do that! Option B is approved. By the way, how is your week looking?\n\nAlex",
+    "expected_intent": "AMBIGUOUS",
+    "expected_time": null
+  }
+]

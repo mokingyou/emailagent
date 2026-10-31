@@ -26,16 +26,54 @@ class SheetsCRMService:
         self.service = service or get_service('sheets', 'v4')
 
     def ensure_sheet_initialized(self) -> None:
-        """Ensures the sheet exists and has the canonical headers in Row 1."""
-        range_name = f"{self.sheet_name}!A1:H1"
+        """
+        Ensures the target tab exists (creates or renames default 'Sheet1' if needed)
+        and writes canonical CRM headers in Row 1.
+        """
         try:
+            # 1. Verify tab existence
+            meta = self.service.spreadsheets().get(spreadsheetId=self.spreadsheet_id).execute()
+            sheet_props = [s['properties'] for s in meta.get('sheets', [])]
+            titles = [p['title'] for p in sheet_props]
+
+            if self.sheet_name not in titles:
+                if len(sheet_props) == 1 and sheet_props[0]['title'] in ['Sheet1', 'Sheet 1']:
+                    # Rename the default blank tab to our CRM tab name
+                    first_sheet_id = sheet_props[0]['sheetId']
+                    self.service.spreadsheets().batchUpdate(
+                        spreadsheetId=self.spreadsheet_id,
+                        body={
+                            "requests": [{
+                                "updateSheetProperties": {
+                                    "properties": {"sheetId": first_sheet_id, "title": self.sheet_name},
+                                    "fields": "title"
+                                }
+                            }]
+                        }
+                    ).execute()
+                    print(f"📄 Renamed default '{sheet_props[0]['title']}' tab to '{self.sheet_name}'.")
+                else:
+                    # Add a new tab named self.sheet_name
+                    self.service.spreadsheets().batchUpdate(
+                        spreadsheetId=self.spreadsheet_id,
+                        body={
+                            "requests": [{
+                                "addSheet": {
+                                    "properties": {"title": self.sheet_name}
+                                }
+                            }]
+                        }
+                    ).execute()
+                    print(f"📄 Created new tab '{self.sheet_name}'.")
+
+            # 2. Verify or initialize headers in Row 1
+            range_name = f"{self.sheet_name}!A1:H1"
             result = self.service.spreadsheets().values().get(
                 spreadsheetId=self.spreadsheet_id,
                 range=range_name
             ).execute()
             rows = result.get('values', [])
             if not rows or rows[0] != CRM_HEADERS:
-                # Write / repair headers
                 self.service.spreadsheets().values().update(
                     spreadsheetId=self.spreadsheet_id,
                     range=range_name,
@@ -44,7 +82,7 @@ class SheetsCRMService:
                 ).execute()
                 print(f"📋 Initialized CRM headers in '{self.sheet_name}'.")
         except Exception as e:
-            raise RuntimeError(f"Failed to access Google Sheet {self.spreadsheet_id}: {e}")
+            raise RuntimeError(f"Failed to access/initialize Google Sheet {self.spreadsheet_id}: {e}")
 
     def get_monitored_emails(self) -> Set[str]:
         """
@@ -138,7 +176,7 @@ class SheetsCRMService:
             existing_notes = contact["notes"]
             new_note_entry = f"[{today_str}]: {note}" if note else ""
             if existing_notes and new_note_entry:
-                updated_notes = f"{existing_notes}\n{new_note_entry}"
+                updated_notes = f"{new_note_entry}\n{existing_notes}"
             elif new_note_entry:
                 updated_notes = new_note_entry
             else:
@@ -148,7 +186,7 @@ class SheetsCRMService:
             existing_events = contact["events"]
             if event_summary:
                 new_event_entry = f"• {event_summary}" if not event_summary.startswith("•") else event_summary
-                updated_events = f"{existing_events}\n{new_event_entry}" if existing_events else new_event_entry
+                updated_events = f"{new_event_entry}\n{existing_events}" if existing_events else new_event_entry
             else:
                 updated_events = existing_events
 

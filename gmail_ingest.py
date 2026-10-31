@@ -1,93 +1,125 @@
-import os
 import base64
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
+from email.utils import parseaddr, parsedate_to_datetime
+from datetime import datetime
+from typing import List, Dict, Optional, Tuple
+from googleapiclient.errors import HttpError
+from google_auth import get_service
 
-# If modifying these scopes, delete the file token.json.
-# We need modify rights to remove the "UNREAD" label later.
-SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+TRIAGE_LABEL_NAME = "AI-Triaged"
 
-def authenticate_gmail():
-    """Handles the OAuth2 flow and returns the Gmail service."""
-    creds = None
-    # token.json stores the user's access and refresh tokens
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    
-    # If there are no (valid) credentials available, let the user log in.
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        # Save the credentials for the next run
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+def get_or_create_triage_label(service, label_name: str = TRIAGE_LABEL_NAME) -> str:
+    """
+    Checks if the triage label exists in Gmail; creates it if not.
+    Returns the label ID.
+    """
+    try:
+        response = service.users().labels().list(userId='me').execute()
+        labels = response.get('labels', [])
+        for label in labels:
+            if label['name'].lower() == label_name.lower():
+                return label['id']
 
-    return build('gmail', 'v1', credentials=creds)
+        # Label does not exist, create it
+        new_label_body = {
+            "name": label_name,
+            "labelListVisibility": "labelShow",
+            "messageListVisibility": "show",
+        }
+        created = service.users().labels().create(userId='me', body=new_label_body).execute()
+        print(f"🏷️ Created new Gmail label: '{label_name}' (ID: {created['id']})")
+        return created['id']
+    except HttpError as e:
+        print(f"⚠️ Error with Gmail labels: {e}")
+        return ""
 
-def get_email_body(payload):
+def get_email_body(payload: Dict) -> str:
     """Recursively parses the email payload to find the plain text body."""
     if 'data' in payload.get('body', {}):
-        # Base64url decode the text
         data = payload['body']['data']
-        return base64.urlsafe_b64decode(data).decode('utf-8')
-    
-    # If it's a multipart email, dig into the parts
+        return base64.urlsafe_b64decode(data).decode('utf-8', errors='replace')
+
     if 'parts' in payload:
         for part in payload['parts']:
-            if part['mimeType'] == 'text/plain' or part['mimeType'] == 'multipart/alternative':
+            if part.get('mimeType') == 'text/plain':
+                return get_email_body(part)
+        for part in payload['parts']:
+            if part.get('mimeType') == 'multipart/alternative':
                 return get_email_body(part)
     return "[No Plain Text Found]"
 
-def fetch_unread_emails(service, max_results=5, query='is:unread in:inbox category:primary'):
-    """Fetches the latest unread emails in the Primary inbox and extracts their text."""
-    print(f"📥 Checking for up to {max_results} unread emails matching: '{query}'...\n")
-    
-    # Search for unread emails in the Primary inbox
-    results = service.users().messages().list(userId='me', q=query, maxResults=max_results).execute()
-    messages = results.get('messages', [])
+def clean_email_text(raw_text: str) -> str:
+    """Strips excessive newlines and basic email noise."""
+    lines = raw_text.splitlines()
+    cleaned_lines = []
+    for line in lines:
+        cleaned_lines.append(line.rstrip())
+    return "\n".join(cleaned_lines).strip()
+
+def fetch_unread_primary_emails(service, max_results: int = 10) -> List[Dict]:
+    """
+    Fetches unread emails in the Primary inbox that haven't been triaged yet:
+    Query: 'is:unread in:inbox category:primary -label:AI-Triaged'
+    """
+    query = f"is:unread in:inbox category:primary -label:{TRIAGE_LABEL_NAME}"
+    try:
+        results = service.users().messages().list(userId='me', q=query, maxResults=max_results).execute()
+        messages = results.get('messages', [])
+    except HttpError as e:
+        print(f"⚠️ Error querying Gmail messages: {e}")
+        return []
 
     if not messages:
-        print("No unread messages found.")
         return []
 
     extracted_emails = []
-    
+
     for msg in messages:
-        # Fetch the full email payload
-        msg_data = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
-        payload = msg_data['payload']
-        headers = payload.get('headers', [])
-        
-        # Extract metadata from headers
-        subject = next((header['value'] for header in headers if header['name'] == 'Subject'), 'No Subject')
-        sender = next((header['value'] for header in headers if header['name'] == 'From'), 'Unknown Sender')
-        date_received = next((header['value'] for header in headers if header['name'] == 'Date'), 'Unknown Date')
-        
-        # Extract clean text body
-        body_text = get_email_body(payload)
-        
-        extracted_emails.append({
-            "id": msg['id'],
-            "sender": sender,
-            "subject": subject,
-            "date": date_received,
-            "body": body_text.strip()
-        })
-        
-        print(f"Found Email From: {sender} | Subject: {subject}")
+        try:
+            msg_data = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
+            payload = msg_data.get('payload', {})
+            headers = payload.get('headers', [])
+
+            subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), 'No Subject')
+            from_header = next((h['value'] for h in headers if h['name'].lower() == 'from'), 'Unknown Sender')
+            date_header = next((h['value'] for h in headers if h['name'].lower() == 'date'), '')
+
+            sender_name, sender_email = parseaddr(from_header)
+            if not sender_name:
+                sender_name = sender_email.split('@')[0].capitalize()
+
+            # Parse date header into datetime
+            try:
+                dt_received = parsedate_to_datetime(date_header) if date_header else datetime.now()
+            except Exception:
+                dt_received = datetime.now()
+
+            body_text = clean_email_text(get_email_body(payload))
+
+            extracted_emails.append({
+                "id": msg['id'],
+                "thread_id": msg.get('threadId', ''),
+                "sender_raw": from_header,
+                "sender_name": sender_name,
+                "sender_email": sender_email.strip().lower(),
+                "subject": subject,
+                "date_received": dt_received,
+                "date_str": date_header,
+                "body": body_text
+            })
+        except Exception as e:
+            print(f"⚠️ Failed to extract message {msg['id']}: {e}")
 
     return extracted_emails
 
-if __name__ == '__main__':
-    gmail_service = authenticate_gmail()
-    emails = fetch_unread_emails(gmail_service)
-    
-    # Print the first extracted email body to verify it worked
-    if emails:
-        print("\n--- Raw Text of First Email ---")
-        print(emails[0]['body'][:500] + "...\n")
+def mark_email_triaged(service, message_id: str, label_id: str) -> bool:
+    """Removes 'UNREAD' and adds 'AI-Triaged' label to message."""
+    try:
+        body = {
+            "removeLabelIds": ["UNREAD"],
+            "addLabelIds": [label_id] if label_id else []
+        }
+        service.users().messages().modify(userId='me', id=message_id, body=body).execute()
+        return True
+    except HttpError as e:
+        print(f"⚠️ Failed to mark message {message_id} as triaged: {e}")
+        return False

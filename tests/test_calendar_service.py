@@ -49,7 +49,7 @@ class TestCalendarService(unittest.TestCase):
         self.assertIn("outside available operating hours", msg)
 
     def test_check_is_free_with_conflict(self):
-        """If freebusy returns busy block, should report conflict."""
+        """If freebusy returns busy block, should report conflict with event name."""
         self.mock_service.freebusy().query().execute.return_value = {
             "calendars": {
                 "primary": {
@@ -57,12 +57,20 @@ class TestCalendarService(unittest.TestCase):
                 }
             }
         }
+        # Mock the events list call that looks up conflicting event names
+        self.mock_service.events().list().execute.return_value = {
+            "items": [{
+                "summary": "Team Standup",
+                "start": {"dateTime": "2026-11-03T14:00:00-08:00"}
+            }]
+        }
         start = PST_TZ.localize(datetime(2026, 11, 3, 14, 0))
         end = PST_TZ.localize(datetime(2026, 11, 3, 14, 30))
 
         is_free, reason = self.cal_service.check_is_free(start, end)
         self.assertFalse(is_free)
-        self.assertIn("conflicts with an existing event", reason)
+        self.assertIn("Conflicts with:", reason)
+        self.assertIn("Team Standup", reason)
 
     def test_create_hold_event_success(self):
         """Tests successful hold creation with no invites and meet link request."""

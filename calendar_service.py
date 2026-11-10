@@ -96,11 +96,44 @@ class CalendarService:
             busy_slots = calendars.get(self.calendar_id, {}).get("busy", [])
 
             if busy_slots:
-                return False, f"Time slot conflicts with an existing event ({len(busy_slots)} conflicting booking found)."
+                # Look up the actual event names that overlap this window
+                conflict_names = self._get_event_names_in_window(start_iso, end_iso)
+                if conflict_names:
+                    names_str = ", ".join(f"'{n}'" for n in conflict_names)
+                    return False, f"Conflicts with: {names_str}"
+                else:
+                    return False, f"Time slot conflicts with {len(busy_slots)} existing booking(s)."
 
             return True, "Slot is free and available"
         except Exception as e:
             return False, f"Free/busy query failed: {e}"
+
+    def _get_event_names_in_window(self, time_min_iso: str, time_max_iso: str) -> List[str]:
+        """Fetches event summaries that overlap a given time window for conflict reporting."""
+        try:
+            events_result = self.service.events().list(
+                calendarId=self.calendar_id,
+                timeMin=time_min_iso,
+                timeMax=time_max_iso,
+                singleEvents=True,
+                orderBy="startTime",
+                maxResults=5
+            ).execute()
+            items = events_result.get("items", [])
+            names = []
+            for ev in items:
+                summary = ev.get("summary", "Untitled Event")
+                start = ev["start"].get("dateTime", ev["start"].get("date", ""))
+                # Format a readable time if available
+                try:
+                    dt = datetime.fromisoformat(start)
+                    time_str = dt.astimezone(PST_TZ).strftime("%I:%M %p")
+                    names.append(f"{summary} ({time_str})")
+                except (ValueError, TypeError):
+                    names.append(summary)
+            return names
+        except Exception:
+            return []
 
     def find_event_by_message_id(self, message_id: str) -> Optional[Dict]:
         """Finds any calendar event originating from a specific Gmail message ID."""
